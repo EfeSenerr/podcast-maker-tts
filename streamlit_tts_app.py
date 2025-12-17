@@ -7,9 +7,69 @@ from typing import List
 import io
 import os
 from dotenv import load_dotenv
+from markitdown import MarkItDown
+from PyPDF2 import PdfReader
+from docx import Document
+import tempfile
+from openai import AzureOpenAI
 
 # Load environment variables from .env file for  
 load_dotenv()
+
+# Podcast transformation prompts
+PODCAST_PROMPTS = {
+"direct": None,  # No LLM transformation
+"podcast-detailed": """You are a skilled podcast script writer. Transform the following text into an engaging, conversational podcast script. The transformed text will be later directly converted to speech, so ensure it flows naturally when spoken.
+
+IMPORTANT RULES:
+1. Cover ALL important points from the original text - this is NOT a summary
+2. Use natural, conversational language as if explaining to a friend
+3. Add transitions between topics to maintain flow
+4. Include brief explanations for complex terms
+5. Maintain the original meaning and all key details
+6. Structure it for audio consumption (no visual references)
+7. Use engaging phrases to keep listeners interested
+8. The output should be comprehensive and detailed
+9. MOST IMPORTANT: Stick to the language and tone of the original text
+
+Original text to transform:
+{text}
+
+Generate the complete podcast script:""",
+
+    "podcast-summary": """You are a skilled podcast script writer. Create a concise but comprehensive summary podcast script from the following text. The transformed text will be later directly converted to speech, so ensure it flows naturally when spoken.
+
+IMPORTANT RULES:
+1. Capture the MAIN points and key takeaways
+2. Use natural, conversational language
+3. Keep it brief but informative (aim for 30-40% of original length)
+4. Structure it for easy listening
+5. Highlight the most important insights
+6. Use engaging language to maintain interest
+7. MOST IMPORTANT: Stick to the language and tone of the original text
+
+Original text to summarize:
+{text}
+
+Generate the summary podcast script:""",
+
+    "podcast-educational": """You are an educational content creator. Transform the following text into an easy-to-understand educational podcast script. The transformed text will be later directly converted to speech, so ensure it flows naturally when spoken.
+
+IMPORTANT RULES:
+1. Cover ALL concepts from the original text
+2. Explain complex ideas in simple terms
+3. Use analogies and examples where helpful
+4. Structure content logically for learning
+5. Add brief recaps of key points
+6. Make it engaging and accessible for all audiences
+7. Include all important details - this is NOT a summary
+8. MOST IMPORTANT: Stick to the language and tone of the original text
+
+Original text to transform:
+{text}
+
+Generate the educational podcast script:"""
+}
 
 class AzureTTSClient:
     def __init__(self, endpoint: str, api_key: str):
@@ -157,6 +217,126 @@ class AzureTTSClient:
         combined_audio = b"".join(audio_chunks)
         return combined_audio
 
+class FileParser:
+    """Helper class to parse different file formats"""
+    
+    @staticmethod
+    def parse_txt(file) -> str:
+        """Parse TXT file"""
+        try:
+            return file.read().decode('utf-8')
+        except UnicodeDecodeError:
+            # Try different encodings
+            file.seek(0)
+            try:
+                return file.read().decode('latin-1')
+            except:
+                raise Exception("Unable to decode text file. Please ensure it's a valid text file.")
+    
+    @staticmethod
+    def parse_pdf(file) -> str:
+        """Parse PDF file using pypdf2"""
+        try:
+            pdf_reader = PdfReader(file)
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            return text.strip()
+        except Exception as e:
+            raise Exception(f"Failed to parse PDF: {str(e)}")
+    
+    @staticmethod
+    def parse_docx(file) -> str:
+        """Parse DOCX file using python-docx"""
+        try:
+            doc = Document(file)
+            text = ""
+            for paragraph in doc.paragraphs:
+                text += paragraph.text + "\n"
+            return text.strip()
+        except Exception as e:
+            raise Exception(f"Failed to parse DOCX: {str(e)}")
+    
+    @staticmethod
+    def parse_with_markitdown(file, file_extension: str) -> str:
+        """Parse file using MarkItDown library"""
+        try:
+            # Save uploaded file to temporary location
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
+                tmp_file.write(file.getvalue())
+                tmp_path = tmp_file.name
+            
+            # Parse with MarkItDown
+            md = MarkItDown()
+            result = md.convert(tmp_path)
+            
+            # Clean up temp file
+            os.unlink(tmp_path)
+            
+            return result.text_content if hasattr(result, 'text_content') else str(result)
+        except Exception as e:
+            raise Exception(f"Failed to parse with MarkItDown: {str(e)}")
+    
+    @staticmethod
+    def parse_file(uploaded_file) -> str:
+        """Main method to parse uploaded files"""
+        file_extension = os.path.splitext(uploaded_file.name)[1].lower()
+        
+        # Try MarkItDown first as it's more robust
+        try:
+            return FileParser.parse_with_markitdown(uploaded_file, file_extension)
+        except Exception as markitdown_error:
+            st.warning(f"MarkItDown parsing failed, trying alternative method...")
+            
+            # Fallback to specific parsers
+            if file_extension == '.txt':
+                return FileParser.parse_txt(uploaded_file)
+            elif file_extension == '.pdf':
+                return FileParser.parse_pdf(uploaded_file)
+            elif file_extension in ['.docx', '.doc']:
+                return FileParser.parse_docx(uploaded_file)
+            else:
+                raise Exception(f"Unsupported file format: {file_extension}")
+
+class TextTransformer:
+    """Transform text using Azure OpenAI LLM for podcast-style content"""
+    
+    def __init__(self, endpoint: str, api_key: str):
+        """Initialize the Azure OpenAI client for text transformation"""
+        # Extract base endpoint (remove /openai/deployments/... if present)
+        base_endpoint = endpoint.split('/openai/deployments')[0] if '/openai/deployments' in endpoint else endpoint
+        
+        self.client = AzureOpenAI(
+            azure_endpoint=base_endpoint,
+            api_key=api_key,
+            api_version="2024-10-21"
+        )
+    
+    def transform_text(self, text: str, style: str, model: str = "gpt-4o-mini") -> str:
+        """Transform text using the selected podcast style"""
+        if style == "direct" or style not in PODCAST_PROMPTS:
+            return text
+        
+        prompt_template = PODCAST_PROMPTS[style]
+        if not prompt_template:
+            return text
+        
+        prompt = prompt_template.format(text=text)
+        
+        try:
+            response = self.client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a professional podcast script writer who creates engaging audio content."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=16000
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise Exception(f"LLM transformation failed: {str(e)}")
+
 def main():
     st.set_page_config(
         page_title="Podcast Maker 🎧",
@@ -169,7 +349,7 @@ def main():
     st.markdown("""Welcome to the Podcast Maker! This application uses Azure OpenAI's TTS API to convert your text into natural-sounding speech. 
                 You can paste any text here, and the application will automatically process it to create seamless, high-quality audio. Long texts are handled intelligently behind the scenes for optimal results.""")
     
-    # Get API credentials from secrets/environment variables
+    # Get TTS API credentials from secrets/environment variables
     try:
         # First try Streamlit secrets
         endpoint = st.secrets.get("AZURE_TTS_ENDPOINT", "")
@@ -178,6 +358,16 @@ def main():
         # Fallback to environment variables if secrets.toml not found
         endpoint = os.getenv("AZURE_TTS_ENDPOINT", "")
         api_key = os.getenv("AZURE_API_KEY", "")
+    
+    # Get LLM API credentials from secrets/environment variables (for podcast transformation)
+    try:
+        # First try Streamlit secrets
+        llm_endpoint = st.secrets.get("AZURE_LLM_ENDPOINT", "")
+        llm_api_key = st.secrets.get("AZURE_LLM_API_KEY", "")
+    except (FileNotFoundError, KeyError):
+        # Fallback to environment variables if secrets.toml not found
+        llm_endpoint = os.getenv("AZURE_LLM_ENDPOINT", "")
+        llm_api_key = os.getenv("AZURE_LLM_API_KEY", "")
     
     # Sidebar for configuration
     with st.sidebar:
@@ -219,6 +409,14 @@ def main():
             st.error("❌ Missing Azure TTS Configuration")
             st.caption("Check your secrets.toml or .env file")
         
+        # Show LLM connection status
+        if llm_endpoint and llm_api_key:
+            st.success("🤖 Azure LLM Connected")
+            st.caption("Podcast transformation available")
+        else:
+            st.warning("⚠️ Azure LLM Not Configured")
+            st.caption("Only Direct mode available")
+        
         st.markdown("### 🎵 Voice & Audio Settings")
         
         # Voice selection with descriptions
@@ -247,23 +445,131 @@ def main():
             help="Select audio output format"
         )
         
-        # Auto-play setting
+        # Auto-play setting (disabled by default)
         auto_play = st.checkbox(
             "🔊 Auto-play audio",
-            value=True,
+            value=False,
             help="Automatically start playing audio after conversion"
         )
+        
+        st.markdown("### 🎙️ Processing Mode")
+        
+        # Determine available processing modes based on LLM configuration
+        if llm_endpoint and llm_api_key:
+            available_modes = ["direct", "podcast-detailed", "podcast-summary", "podcast-educational"]
+        else:
+            available_modes = ["direct"]
+            st.caption("⚠️ Configure LLM credentials to enable podcast modes")
+        
+        # Processing mode selection
+        processing_mode = st.selectbox(
+            "📝 Content Style",
+            options=available_modes,
+            index=0,
+            format_func=lambda x: {
+                "direct": "📄 Direct - Convert text as-is",
+                "podcast-detailed": "🎙️ Podcast (Detailed) - Full content, conversational",
+                "podcast-summary": "📋 Podcast (Summary) - Key points only",
+                "podcast-educational": "📚 Podcast (Educational) - Easy to understand"
+            }[x],
+            help="Choose how to process the text before converting to speech"
+        )
+        
+        if processing_mode != "direct":
+            st.info("💡 LLM will transform your text into podcast-style content before TTS conversion")
+            
+            # LLM model selection
+            llm_model = st.selectbox(
+                "🤖 LLM Model",
+                options=["gpt-4.1"],
+                index=0,
+                help="Select the model for text transformation (deployment name)"
+            )
+        else:
+            llm_model = None
         
     # Main content area
     col1, col2 = st.columns([2, 1])
     
     with col1:
         st.header("📝 Text Input")
-        text_input = st.text_area(
-            "Enter your text to convert to speech:",
-            value="""You can paste any text here.""",
-            height=200
-        )
+        
+        # Add tabs for text input methods
+        input_tab1, input_tab2 = st.tabs(["✍️ Type/Paste Text", "📁 Upload File"])
+        
+        with input_tab1:
+            text_input = st.text_area(
+                "Enter your text to convert to speech:",
+                value="""You can paste any text here.""",
+                height=200,
+                key="manual_text_input"
+            )
+        
+        with input_tab2:
+            st.markdown("**Upload documents to convert to speech**")
+            st.caption("You can upload multiple files (up to 3). They will be combined in upload order.")
+            
+            uploaded_files = st.file_uploader(
+                "Choose file(s)",
+                type=['txt', 'pdf', 'docx'],
+                help="Supported formats: TXT, PDF, DOCX. Upload up to 3 files.",
+                accept_multiple_files=True
+            )
+            
+            if uploaded_files:
+                # Limit to 3 files
+                if len(uploaded_files) > 3:
+                    st.warning("⚠️ Maximum 3 files allowed. Only the first 3 will be processed.")
+                    uploaded_files = uploaded_files[:3]
+                
+                st.success(f"✅ {len(uploaded_files)} file(s) uploaded")
+                
+                # Display file list
+                for i, file in enumerate(uploaded_files):
+                    st.write(f"  {i+1}. {file.name}")
+                
+                combined_parsed_text = ""
+                
+                with st.spinner("📖 Parsing files..."):
+                    for i, uploaded_file in enumerate(uploaded_files):
+                        try:
+                            parsed_text = FileParser.parse_file(uploaded_file)
+                            
+                            if parsed_text:
+                                st.success(f"✅ File {i+1}: Extracted {len(parsed_text):,} characters from {uploaded_file.name}")
+                                
+                                # Add separator between files if multiple
+                                if combined_parsed_text:
+                                    combined_parsed_text += "\n\n--- Next Document ---\n\n"
+                                combined_parsed_text += parsed_text
+                            else:
+                                st.error(f"❌ No text could be extracted from {uploaded_file.name}")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Error parsing {uploaded_file.name}: {str(e)}")
+                
+                if combined_parsed_text:
+                    st.success(f"📊 Total extracted: {len(combined_parsed_text):,} characters from {len(uploaded_files)} file(s)")
+                    
+                    # Show full preview with scrollable text area - using combined_parsed_text
+                    with st.expander("📄 Preview extracted text (click to expand)", expanded=False):
+                        # Create a unique key for each preview based on file names
+                        preview_key = f"preview_{hash(''.join([f.name for f in uploaded_files]))}"
+                        st.text_area(
+                            "Full extracted content from all files:",
+                            value=combined_parsed_text,
+                            height=400,
+                            disabled=True,
+                            key=preview_key
+                        )
+                        st.caption(f"Total characters: {len(combined_parsed_text):,} | Files: {len(uploaded_files)}")
+                    
+                    # Use combined parsed text as input
+                    text_input = combined_parsed_text
+                else:
+                    text_input = ""
+            else:
+                text_input = ""
 
         # Safety: Limit input to ~10 pages (about 30,000 characters)
         MAX_INPUT_CHARS = 50000  # ~10 pages (assuming 3000 chars/page)
@@ -285,13 +591,37 @@ def main():
                 return
 
             try:
+                final_text = text_input.strip()
+                
+                # Apply LLM transformation if selected
+                if processing_mode != "direct":
+                    if not llm_endpoint or not llm_api_key:
+                        st.error("❌ LLM credentials not configured. Please set AZURE_LLM_ENDPOINT and AZURE_LLM_API_KEY in your .env file or secrets.")
+                        return
+                    
+                    with st.spinner(f"🤖 Transforming text to {processing_mode} style..."):
+                        st.info(f"Using {llm_model} to create podcast-style content...")
+                        transformer = TextTransformer(llm_endpoint, llm_api_key)
+                        final_text = transformer.transform_text(final_text, processing_mode, llm_model)
+                        st.success(f"✅ Text transformed! New length: {len(final_text):,} characters")
+                        
+                        # Show transformed text preview
+                        with st.expander("📝 Preview transformed text", expanded=False):
+                            st.text_area(
+                                "Podcast script:",
+                                value=final_text,
+                                height=300,
+                                disabled=True,
+                                key="transformed_text_preview"
+                            )
+                
                 # Initialize TTS client
                 with st.spinner("Initializing TTS client..."):
                     tts_client = AzureTTSClient(endpoint, api_key)
 
                 # Convert text to audio
                 with st.spinner("Converting text to speech..."):
-                    combined_audio = tts_client.convert_text_to_audio_data(text_input.strip(), selected_voice)
+                    combined_audio = tts_client.convert_text_to_audio_data(final_text, selected_voice)
 
                 if not combined_audio:
                     st.error("Failed to generate audio")
@@ -303,7 +633,7 @@ def main():
                 st.session_state.combined_audio = combined_audio
 
             except Exception as e:
-                st.error(f"❌ TTS conversion failed: {str(e)}")
+                st.error(f"❌ Conversion failed: {str(e)}")
     
     with col2:
         st.header("Audio Player")
@@ -335,6 +665,7 @@ def main():
             show_audio_info = st.checkbox("📊 Show detailed audio info", help="Display technical audio information")
             
             if show_audio_info:
+                audio_size_kb = len(combined_audio) / 1024
                 st.info(f"📊 Format: {audio_format.upper()} | Voice: {selected_voice} | Size: {audio_size_kb:.1f} KB")
             
             # Download section
@@ -390,13 +721,14 @@ def main():
         st.markdown("""
         ### 🚀 Quick Start Guide
         
-        1. **🔐 Configure Credentials**: Enter your Azure OpenAI endpoint and API key in the sidebar (completely hidden for security)
+        1. **🔐 Configure Credentials**: Ensure your Azure OpenAI endpoint and API key are set in secrets
         2. **🎤 Choose Voice**: Select from 6 different voice personalities with unique characteristics
-        3. **🎛️ Audio Settings**: Choose your preferred audio format and enable auto-advance if desired
-        4. **📝 Enter Text**: Paste or type your text in the main text area
-        5. **🎵 Convert**: Click "Convert to Speech" to generate high-quality audio
-        6. **🎧 Listen**: Use the enhanced audio player with navigation controls
-        7. **💾 Download**: Save individual chunks or complete audio files
+        3. **�️ Select Processing Mode**: Choose Direct (as-is) or Podcast style (AI-enhanced)
+        4. **📝 Enter Text**: Type/paste text OR upload up to 3 documents (TXT, PDF, DOCX)
+        5. **�️ Preview**: View the full extracted text before conversion
+        6. **🎵 Convert**: Click "Convert to Speech" to generate high-quality audio
+        7. **🎧 Listen**: Click play to listen (auto-play is disabled by default)
+        8. **💾 Download**: Save the complete audio file
         
         ### 🎵 Voice Personalities
         - **Alloy**: Balanced and natural - great for general content
@@ -407,15 +739,25 @@ def main():
         - **Shimmer**: Soft and gentle - perfect for meditation or relaxation
         
         ### ✨ Advanced Features
+        - ✅ **Multiple File Upload**: Upload up to 3 files (TXT, PDF, DOCX) and combine them
+        - ✅ **Full Text Preview**: View the complete extracted text before conversion
+        - ✅ **Podcast Transformation**: Use AI to transform text into engaging podcast scripts
+        - ✅ **Multiple Styles**: Choose from Direct, Detailed Podcast, Summary, or Educational modes
         - ✅ **Smart Text Processing**: Automatically handles long texts with intelligent processing
+        - ✅ **Multiple Parsers**: Uses MarkItDown with fallback parsers for robust file handling
         - ✅ **Parallel Processing**: Faster generation with multi-threaded conversion
         - ✅ **Seamless Audio**: Creates continuous, uninterrupted audio playback
         - ✅ **Mobile-Optimized**: Responsive design works perfectly on phones
         - ✅ **Multiple Audio Formats**: Choose between MP3, WAV, and OGG formats
-        - ✅ **Auto-Play Option**: Automatically start playing audio after conversion
         - ✅ **Secure Credentials**: API keys are completely hidden and secure
         - ✅ **Progress Tracking**: Real-time feedback during audio generation
         - ✅ **Easy Downloads**: Save complete audio files with one click
+        
+        ### 🎙️ Processing Modes
+        - **📄 Direct**: Convert text exactly as-is - no modifications
+        - **🎙️ Podcast (Detailed)**: Transform into conversational podcast covering ALL points
+        - **📋 Podcast (Summary)**: Create a concise summary podcast with key takeaways
+        - **📚 Podcast (Educational)**: Make complex content easy to understand
         
         ### 🎛️ Audio Controls
         - **Auto-Play**: Enable to automatically start playing audio after conversion
@@ -440,8 +782,10 @@ def main():
         - **Memory Efficient**: Audio data is streamed efficiently without excessive memory usage
         
         ### 💡 Pro Tips
+        - **File Upload**: Upload PDF documents, Word files, or text files - they'll be automatically parsed
         - **Long Documents**: The app automatically handles long texts - just paste and convert!
         - **Voice Testing**: Try different voices with the same text to find your preferred style
+        - **Text Preview**: After uploading a file, you can preview the extracted text before converting
         - **Mobile Downloads**: Audio files can be saved directly to your phone for offline listening
         - **Browser Compatibility**: Works best in modern browsers with HTML5 audio support
         
