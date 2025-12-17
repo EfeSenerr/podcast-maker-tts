@@ -1,83 +1,112 @@
-# 🎵 Podcast Maker 🎧
+# Azure TTS Streamlit App
 
-A Python application that converts text to speech using Azure OpenAI's TTS API with parallel processing for long texts.
+A web-based Text-to-Speech application using Azure OpenAI's TTS API, built with Streamlit for easy deployment and mobile access.
 
-## Features
+## 🌟 Features
 
-- **Text-to-Speech Conversion**: Uses Azure OpenAI's gpt-4o-mini-tts model
-- **Smart Text Chunking**: Automatically splits long texts (>4000 chars) while respecting sentence boundaries
-- **Parallel Processing**: Processes multiple chunks simultaneously for faster generation
-- **Sequential Playback**: Plays audio chunks in order for natural speech flow
-- **GUI Interface**: Easy-to-use graphical interface with Tkinter
-- **Multiple Voices**: Supports 6 different voice options (alloy, echo, fable, onyx, nova, shimmer)
-- **Real-time Control**: Start, stop, and clear functions
+- **� File Upload Support**: Upload and parse TXT, PDF, or DOCX files automatically
+- **�📱 Mobile-Friendly**: Works perfectly on phones and tablets
+- **🎵 Multiple Voices**: Choose from 6 different voices (alloy, echo, fable, onyx, nova, shimmer)
+- **⚡ Parallel Processing**: Fast audio generation with automatic text chunking
+- **🎧 Audio Player**: Built-in player with chunk navigation
+- **💾 Download Support**: Download individual chunks or complete audio
+- **🆓 Free Deployment**: Deploy for free on Streamlit Cloud
 
-## Setup
+## 🚀 Live Demo
 
-1. **Activate your environment**:
-   ```powershell
-   conda activate xx
+🔗 **[Try it here](https://your-app-name.streamlit.app)** (link will be available after deployment)
+
+## 📱 Mobile Access
+
+This app is optimized for mobile devices! Access it from your phone's browser for on-the-go text-to-speech conversion.
+
+## 🛠️ Local Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/your-username/azure-tts-streamlit.git
+   cd azure-tts-streamlit
    ```
 
-2. **Install dependencies**:
-   ```powershell
-   pip install -r requirements.txt
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements_streamlit.txt
    ```
 
-3. **Configure API credentials** (optional):
-   - Edit `config.py` to update your endpoint and API key
-   - Or set environment variables `AZURE_TTS_ENDPOINT` and `AZURE_API_KEY`
+3. **Run the app:**
+   ```bash
+   streamlit run streamlit_tts_app.py
+   ```
 
-## Usage
+4. **Open your browser** to `http://localhost:8501`
 
-### GUI Interface (Recommended)
+## ⚙️ Configuration
 
-Run the application:
-```powershell
-python azure_tts_app.py
+### Required (TTS)
+1. Set `AZURE_TTS_ENDPOINT` - Your Azure OpenAI TTS endpoint URL
+2. Set `AZURE_API_KEY` - Your Azure OpenAI API key
+
+### Optional (Podcast Transformation)
+3. Set `AZURE_LLM_ENDPOINT` - Your Azure OpenAI base endpoint (for LLM)
+4. Set `AZURE_LLM_API_KEY` - Your Azure OpenAI API key (can be same as TTS)
+
+Configuration methods:
+- **Production**: Use Streamlit secrets (`secrets.toml`)
+- **Local Development**: Use `.env` file (copy `.env.example` to `.env`)
+
+## 📋 Requirements
+
+- Python 3.7+
+- Azure OpenAI TTS API access
+- Streamlit
+- Requests
+- MarkItDown (for file parsing)
+- python-docx (for DOCX support)
+- pypdf2 & pdfplumber (for PDF support)
+
+## 🎯 How It Works
+
+1. **Text Input**: Type/paste text OR upload a document (TXT, PDF, DOCX)
+2. **File Parsing**: Documents are automatically parsed using MarkItDown with smart fallback methods
+3. **Text Chunking**: Long texts are automatically split into chunks (≤6000 characters)
+4. **Parallel Processing**: Multiple API calls process chunks simultaneously
+5. **Sequential Playback**: Audio chunks play in order for natural speech flow
+6. **Mobile Optimization**: Responsive design works on all devices
+
+## 📁 Project Structure
+
+```
+azure-tts-streamlit/
+├── streamlit_tts_app.py          # Main Streamlit application
+├── requirements_streamlit.txt     # Python dependencies
+├── README.md                     # This file
+└── web_tts_app.py               # Alternative Flask version
 ```
 
-1. The application will start with a GUI
-2. Configure your API endpoint and key (pre-filled from your provided values)
-3. Click "Initialize TTS Client"
-4. Paste your text in the text area
-5. Select a voice from the dropdown
-6. Click "Convert & Play" to generate and play the speech
+## 🆓 Free Deployment Options
 
-### Command Line Quick Test
+### Streamlit Cloud (Recommended)
+1. Push to GitHub
+2. Connect to Streamlit Cloud
+3. Deploy instantly - no cost!
 
-For a quick test, run:
-```powershell
-python azure_tts_app.py
-```
-Then choose option "2" for the quick test.
+### Other Options
+- Heroku (free tier)
+- Railway (free tier)
+- Render (free tier)
 
-## How It Works
+## 🔐 Security Note
 
-1. **Text Processing**: Long texts are intelligently split into chunks of ~4000 characters
-2. **Parallel Generation**: Multiple API calls are made simultaneously to generate audio for each chunk
-3. **Sequential Playback**: Audio chunks are played in the correct order to maintain speech flow
-4. **Performance**: About 5x faster than real-time audio generation
+For production use, consider using environment variables or Streamlit secrets for API credentials instead of hardcoding them.
 
-## Configuration Options
+## 📄 License
 
-- **Voices**: alloy, echo, fable, onyx, nova, shimmer
-- **Max Characters**: 4000 per chunk (API limit is 4096)
-- **Max Workers**: 3 parallel API calls (configurable)
+This project is open source and available under the [MIT License](LICENSE).
 
-## File Structure
+## 🤝 Contributing
 
-```
-azure-tts-app/
-├── azure_tts_app.py    # Main application
-├── .env           # Configuration settings
-├── requirements.txt    # Python dependencies
-└── README.md          # This file
-```
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/your-username/azure-tts-streamlit/issues).
 
-## Troubleshooting
+## ⭐ Support
 
-- **Audio not playing**: Ensure pygame is properly installed and your system has audio output
-- **API errors**: Check your endpoint URL and API key
-- **Import errors**: Make sure all dependencies are installed in the correct conda environment
-- **Rate limits**: The application respects API rate limits with parallel processing controls
+If this project helps you, please give it a ⭐ on GitHub!
