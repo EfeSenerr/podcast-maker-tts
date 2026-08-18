@@ -6,3 +6,4 @@ python-docx
 pypdf2
 pdfplumber
 openai
+azure-cognitiveservices-speech

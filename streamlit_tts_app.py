@@ -1,16 +1,19 @@
 import streamlit as st
 import requests
 import base64
+import html
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 import io
 import os
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 from markitdown import MarkItDown
 from PyPDF2 import PdfReader
 from docx import Document
 import tempfile
+import azure.cognitiveservices.speech as speechsdk
 from openai import AzureOpenAI
 
 # Load environment variables from .env file for  
@@ -71,15 +74,38 @@ Original text to transform:
 Generate the educational podcast script:"""
 }
 
-class AzureTTSClient:
-    def __init__(self, endpoint: str, api_key: str):
+
+def get_config_value(name: str, default: str = "") -> str:
+    """Read configuration from Streamlit secrets, then environment variables."""
+    try:
+        value = st.secrets.get(name, "")
+    except (FileNotFoundError, KeyError):
+        value = ""
+    return str(value or os.getenv(name, default)).strip()
+
+
+def azure_resource_endpoint(endpoint: str) -> str:
+    """Return the resource origin expected by Azure SDK clients."""
+    parsed = urlparse(endpoint.strip())
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("Endpoint must be a complete HTTPS URL.")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+class AzureOpenAITTSClient:
+    def __init__(self, endpoint: str, api_key: str, model: str, audio_format: str = "mp3"):
         """Initialize the Azure TTS client"""
-        self.endpoint = endpoint
+        endpoint = endpoint.strip()
+        if "/audio/speech" in endpoint:
+            self.endpoint = endpoint
+        else:
+            self.endpoint = (
+                f"{azure_resource_endpoint(endpoint)}/openai/v1/audio/speech"
+                "?api-version=preview"
+            )
         self.api_key = api_key
-        self.headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
-        }
+        self.model = model
+        self.audio_format = audio_format
         
     def chunk_text(self, text: str, max_chars: int = 6000) -> List[str]:
         """Split text into chunks that respect sentence boundaries
@@ -136,19 +162,31 @@ class AzureTTSClient:
     def text_to_speech(self, text: str, voice: str = "alloy") -> bytes:
         """Convert text to speech using Azure OpenAI TTS API"""
         payload = {
-            "model": "gpt-4o-mini-tts",
+            "model": self.model,
             "input": text,
-            "voice": voice
+            "voice": voice,
+            "response_format": self.audio_format
         }
         
         try:
             response = requests.post(
                 self.endpoint,
-                headers=self.headers,
+                headers={
+                    "Content-Type": "application/json",
+                    "api-key": self.api_key
+                },
                 json=payload,
                 timeout=30
             )
-            response.raise_for_status()
+            if not response.ok:
+                try:
+                    error_detail = response.json().get("error", {}).get("message", response.text)
+                except requests.exceptions.JSONDecodeError:
+                    error_detail = response.text
+                raise RuntimeError(
+                    f"Azure OpenAI returned HTTP {response.status_code}: "
+                    f"{str(error_detail)[:500]}"
+                )
             return response.content
         except requests.exceptions.RequestException as e:
             raise Exception(f"TTS API request failed: {str(e)}")
@@ -189,11 +227,13 @@ class AzureTTSClient:
         
         progress_bar.empty()
         
-        # Filter out None results
-        audio_chunks = [audio for audio in results if audio is not None]
-        
-        if not audio_chunks:
-            raise Exception("No audio chunks were successfully generated")
+        failed_chunks = [index + 1 for index, audio in enumerate(results) if audio is None]
+        if failed_chunks:
+            raise RuntimeError(
+                "Audio generation failed for part(s): "
+                + ", ".join(str(index) for index in failed_chunks)
+            )
+        audio_chunks = results
         
         # Combine all chunks into a single audio file
         if len(audio_chunks) > 1:
@@ -216,6 +256,43 @@ class AzureTTSClient:
         # This works because MP3 is designed to be streamable
         combined_audio = b"".join(audio_chunks)
         return combined_audio
+
+
+class AzureSpeechTTSClient(AzureOpenAITTSClient):
+    def __init__(self, endpoint: str, api_key: str, audio_format: str = "mp3"):
+        """Initialize Azure AI Speech for neural and MAI voices."""
+        self.speech_config = speechsdk.SpeechConfig(
+            subscription=api_key,
+            endpoint=azure_resource_endpoint(endpoint)
+        )
+        self.speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
+        )
+        self.audio_format = audio_format
+
+    def text_to_speech(self, text: str, voice: str) -> bytes:
+        """Convert text to speech with the Azure Speech SDK."""
+        locale_parts = voice.split("-", 2)[:2]
+        language = "-".join(locale_parts) if len(locale_parts) == 2 else "en-US"
+        ssml = (
+            '<speak version="1.0" '
+            'xmlns="http://www.w3.org/2001/10/synthesis" '
+            f'xml:lang="{html.escape(language)}">'
+            f'<voice name="{html.escape(voice)}">{html.escape(text)}</voice>'
+            "</speak>"
+        )
+        synthesizer = speechsdk.SpeechSynthesizer(
+            speech_config=self.speech_config,
+            audio_config=None
+        )
+        result = synthesizer.speak_ssml_async(ssml).get()
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+            return bytes(result.audio_data)
+
+        cancellation = speechsdk.SpeechSynthesisCancellationDetails.from_result(result)
+        detail = cancellation.error_details or str(cancellation.reason)
+        raise RuntimeError(f"Azure Speech synthesis failed: {detail}")
+
 
 class FileParser:
     """Helper class to parse different file formats"""
@@ -346,103 +423,131 @@ def main():
     )
     
     st.title("🎵 Podcast Maker 🎧")
-    st.markdown("""Welcome to the Podcast Maker! This application uses Azure OpenAI's TTS API to convert your text into natural-sounding speech. 
+    st.markdown("""Welcome to the Podcast Maker! This application uses Azure OpenAI or Azure AI Speech to convert your text into natural-sounding speech.
                 You can paste any text here, and the application will automatically process it to create seamless, high-quality audio. Long texts are handled intelligently behind the scenes for optimal results.""")
-    
-    # Get TTS API credentials from secrets/environment variables
-    try:
-        # First try Streamlit secrets
-        endpoint = st.secrets.get("AZURE_TTS_ENDPOINT", "")
-        api_key = st.secrets.get("AZURE_API_KEY", "")
-    except (FileNotFoundError, KeyError):
-        # Fallback to environment variables if secrets.toml not found
-        endpoint = os.getenv("AZURE_TTS_ENDPOINT", "")
-        api_key = os.getenv("AZURE_API_KEY", "")
-    
-    # Get LLM API credentials from secrets/environment variables (for podcast transformation)
-    try:
-        # First try Streamlit secrets
-        llm_endpoint = st.secrets.get("AZURE_LLM_ENDPOINT", "")
-        llm_api_key = st.secrets.get("AZURE_LLM_API_KEY", "")
-    except (FileNotFoundError, KeyError):
-        # Fallback to environment variables if secrets.toml not found
-        llm_endpoint = os.getenv("AZURE_LLM_ENDPOINT", "")
-        llm_api_key = os.getenv("AZURE_LLM_API_KEY", "")
     
     # Sidebar for configuration
     with st.sidebar:
         st.header("⚙️ Configuration")
-        
-        # # API Configuration with smart fallback
-        # # Try Streamlit secrets first, then environment variables, then empty
-        # default_endpoint = ""
-        # default_api_key = ""
-        
-        # try:
-        #     # First try Streamlit secrets
-        #     default_endpoint = st.secrets.get("AZURE_TTS_ENDPOINT", "")
-        #     default_api_key = st.secrets.get("AZURE_API_KEY", "")
-        # except (FileNotFoundError, KeyError):
-        #     # Fallback to environment variables if secrets.toml not found
-        #     default_endpoint = os.getenv("AZURE_TTS_ENDPOINT", "")
-        #     default_api_key = os.getenv("AZURE_API_KEY", "")
-        
-        # endpoint = st.text_input(
-        #     "API Endpoint",
-        #     value=default_endpoint,
-        #     type="default",
-        #     help="Your Azure OpenAI TTS endpoint URL"
-        # )
-        
-        # api_key = st.text_input(
-        #     "API Key",
-        #     value=default_api_key,
-        #     type="password",
-        #     help="Your Azure OpenAI API key (completely hidden for security)"
-        # )
+
+        provider_labels = {
+            "azure_openai": "Azure OpenAI (gpt-4o-mini-tts)",
+            "azure_speech": "Azure AI Speech (Neural / MAI Voice)"
+        }
+        configured_provider = get_config_value("TTS_PROVIDER", "azure_openai")
+        if configured_provider not in provider_labels:
+            configured_provider = "azure_openai"
+        tts_provider = st.selectbox(
+            "TTS Provider",
+            options=list(provider_labels),
+            index=list(provider_labels).index(configured_provider),
+            format_func=lambda value: provider_labels[value]
+        )
+
+        endpoint_name = (
+            "AZURE_SPEECH_ENDPOINT" if tts_provider == "azure_speech"
+            else "AZURE_TTS_ENDPOINT"
+        )
+        key_name = "AZURE_SPEECH_KEY" if tts_provider == "azure_speech" else "AZURE_API_KEY"
+
+        with st.expander("🔐 API configuration", expanded=True):
+            endpoint = st.text_input(
+                "Endpoint",
+                value=get_config_value(endpoint_name),
+                key=f"{tts_provider}_endpoint",
+                help=(
+                    "For Azure Speech, use https://RESOURCE.cognitiveservices.azure.com. "
+                    "For Azure OpenAI, use the resource base URL or full audio/speech URL."
+                )
+            ).strip()
+            api_key = st.text_input(
+                "API key",
+                value=get_config_value(key_name),
+                key=f"{tts_provider}_api_key",
+                type="password",
+                help="Used only for this browser session; the app does not save it."
+            ).strip()
+
+            if tts_provider == "azure_openai":
+                tts_model = st.text_input(
+                    "TTS deployment name",
+                    value=get_config_value("AZURE_TTS_MODEL", "gpt-4o-mini-tts"),
+                    help="This must be your Azure deployment name, not necessarily the base model name."
+                ).strip()
+                speech_voice = None
+            else:
+                tts_model = None
+                speech_voice = st.text_input(
+                    "Speech voice name",
+                    value=get_config_value(
+                        "AZURE_SPEECH_VOICE",
+                        "tr-TR-Elif:MAI-Voice-2-Flash"
+                    ),
+                    help="Example MAI voice: tr-TR-Elif:MAI-Voice-2-Flash"
+                ).strip()
+
+        with st.expander("🤖 Optional podcast transformation"):
+            llm_endpoint = st.text_input(
+                "LLM endpoint",
+                value=get_config_value("AZURE_LLM_ENDPOINT"),
+                help="Azure OpenAI resource base URL."
+            ).strip()
+            llm_api_key = st.text_input(
+                "LLM API key",
+                value=get_config_value("AZURE_LLM_API_KEY"),
+                type="password"
+            ).strip()
+            llm_model = st.text_input(
+                "LLM deployment name",
+                value=get_config_value("AZURE_LLM_DEPLOYMENT", "gpt-4.1"),
+                help="This must match an Azure OpenAI chat model deployment."
+            ).strip()
 
         # Show connection status
         if endpoint and api_key:
-            st.success("🔗 Azure TTS Connected")
-            st.caption("Using configured secrets")
+            st.success("🔗 TTS configuration ready")
+            st.caption("Credentials are present; they are validated on conversion")
         else:
             st.error("❌ Missing Azure TTS Configuration")
-            st.caption("Check your secrets.toml or .env file")
+            st.caption("Enter credentials above or configure Streamlit secrets")
         
         # Show LLM connection status
         if llm_endpoint and llm_api_key:
-            st.success("🤖 Azure LLM Connected")
-            st.caption("Podcast transformation available")
+            st.success("🤖 Azure LLM configuration ready")
+            st.caption("Credentials are validated when transformation runs")
         else:
             st.warning("⚠️ Azure LLM Not Configured")
             st.caption("Only Direct mode available")
         
         st.markdown("### 🎵 Voice & Audio Settings")
         
-        # Voice selection with descriptions
-        voice_options = {
-            "alloy": "Alloy - Balanced and natural",
-            "echo": "Echo - Clear and articulate", 
-            "fable": "Fable - Warm and storytelling",
-            "onyx": "Onyx - Deep and authoritative",
-            "nova": "Nova - Bright and energetic", 
-            "shimmer": "Shimmer - Soft and gentle"
-        }
-        
-        selected_voice = st.selectbox(
-            "🎤 Voice Style",
-            options=list(voice_options.keys()),
-            index=0,
-            format_func=lambda x: voice_options[x],
-            help="Choose the voice character for text-to-speech"
-        )
+        if tts_provider == "azure_openai":
+            voice_options = {
+                "alloy": "Alloy - Balanced and natural",
+                "echo": "Echo - Clear and articulate",
+                "fable": "Fable - Warm and storytelling",
+                "onyx": "Onyx - Deep and authoritative",
+                "nova": "Nova - Bright and energetic",
+                "shimmer": "Shimmer - Soft and gentle"
+            }
+            selected_voice = st.selectbox(
+                "🎤 Voice Style",
+                options=list(voice_options.keys()),
+                index=0,
+                format_func=lambda x: voice_options[x],
+                help="Choose the voice character for text-to-speech"
+            )
+        else:
+            voice_options = {speech_voice: speech_voice}
+            selected_voice = speech_voice
+            st.caption(f"🎤 Voice: {speech_voice or 'Not configured'}")
         
         # Audio format option
         audio_format = st.selectbox(
             "🎵 Audio Format",
-            options=["mp3", "wav", "ogg"],
+            options=["mp3"],
             index=0,
-            help="Select audio output format"
+            help="MP3 supports reliable concatenation when long text is split into parts."
         )
         
         # Auto-play setting (disabled by default)
@@ -477,16 +582,6 @@ def main():
         
         if processing_mode != "direct":
             st.info("💡 LLM will transform your text into podcast-style content before TTS conversion")
-            
-            # LLM model selection
-            llm_model = st.selectbox(
-                "🤖 LLM Model",
-                options=["gpt-4.1"],
-                index=0,
-                help="Select the model for text transformation (deployment name)"
-            )
-        else:
-            llm_model = None
         
     # Main content area
     col1, col2 = st.columns([2, 1])
@@ -579,7 +674,15 @@ def main():
         # Convert button
         if st.button("🎵 Convert to Speech", type="primary", use_container_width=True):
             if not endpoint or not api_key:
-                st.error("Please provide both API endpoint and key in the sidebar")
+                st.error("Please provide both API endpoint and key in the sidebar.")
+                return
+
+            if tts_provider == "azure_openai" and not tts_model:
+                st.error("Please provide the Azure OpenAI TTS deployment name.")
+                return
+
+            if tts_provider == "azure_speech" and not selected_voice:
+                st.error("Please provide an Azure Speech voice name.")
                 return
 
             if not text_input.strip():
@@ -617,7 +720,15 @@ def main():
                 
                 # Initialize TTS client
                 with st.spinner("Initializing TTS client..."):
-                    tts_client = AzureTTSClient(endpoint, api_key)
+                    if tts_provider == "azure_speech":
+                        tts_client = AzureSpeechTTSClient(endpoint, api_key, audio_format)
+                    else:
+                        tts_client = AzureOpenAITTSClient(
+                            endpoint,
+                            api_key,
+                            tts_model,
+                            audio_format
+                        )
 
                 # Convert text to audio
                 with st.spinner("Converting text to speech..."):
@@ -761,7 +872,7 @@ def main():
         
         ### 🎛️ Audio Controls
         - **Auto-Play**: Enable to automatically start playing audio after conversion
-        - **Format Selection**: Choose the best audio format for your needs
+        - **MP3 Output**: Long audio can be combined reliably and downloaded as MP3
         - **Browser Controls**: Use your browser's native audio controls for full playback control
         - **Audio Info**: View technical details about your generated audio
         
@@ -800,12 +911,13 @@ def main():
         st.markdown("""
         ### 🛡️ Security Features
         - **Hidden API Keys**: Your credentials are masked and never displayed in logs
-        - **Secure Storage**: API keys are stored securely in Streamlit secrets
+        - **Secure Storage**: Deployed keys can be stored in Streamlit secrets
+        - **Session-Only Overrides**: Keys entered in the sidebar are not written to disk
         - **No Persistence**: Audio data is not permanently stored on servers
         - **HTTPS Ready**: Fully compatible with secure HTTPS deployments
         
         ### 🔒 Privacy Considerations
-        - **Text Processing**: Your text is sent to Azure OpenAI for processing
+        - **Text Processing**: Your text is sent to the selected Azure service
         - **Temporary Storage**: Audio is generated and delivered directly to your browser
         - **No Tracking**: This app doesn't track or store your personal data
         - **Local Downloads**: Generated audio files are saved locally to your device
@@ -821,7 +933,7 @@ def main():
     
     with col_footer2:
         st.markdown("**🔗 Powered By**")
-        st.markdown("Azure OpenAI TTS API")
+        st.markdown("Azure OpenAI / Azure AI Speech")
     
     with col_footer3:
         st.markdown("**🔗 Github**")

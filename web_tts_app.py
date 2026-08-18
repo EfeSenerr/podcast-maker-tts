@@ -23,7 +23,7 @@ class AzureTTSClient:
         self.api_key = api_key
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
+            "api-key": api_key
         }
         
     def chunk_text(self, text: str, max_chars: int = 4000) -> List[str]:

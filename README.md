@@ -30,7 +30,7 @@ This app is optimized for mobile devices! Access it from your phone's browser fo
 
 2. **Install dependencies:**
    ```bash
-   pip install -r requirements_streamlit.txt
+   pip install -r requirements.txt
    ```
 
 3. **Run the app:**
@@ -43,16 +43,38 @@ This app is optimized for mobile devices! Access it from your phone's browser fo
 ## ⚙️ Configuration
 
 ### Required (TTS)
-1. Set `AZURE_TTS_ENDPOINT` - Your Azure OpenAI TTS endpoint URL
-2. Set `AZURE_API_KEY` - Your Azure OpenAI API key
+
+Choose one provider with `TTS_PROVIDER`:
+
+- `azure_openai`: set `AZURE_TTS_ENDPOINT`, `AZURE_API_KEY`, and
+  `AZURE_TTS_MODEL`. The model value is the Azure deployment name. A resource
+  base URL such as `https://RESOURCE.openai.azure.com` is recommended.
+- `azure_speech`: set `AZURE_SPEECH_ENDPOINT`, `AZURE_SPEECH_KEY`, and
+  `AZURE_SPEECH_VOICE`. For the MAI voice in Azure AI Foundry, use a resource
+  URL such as `https://RESOURCE.cognitiveservices.azure.com` and a voice such
+  as `tr-TR-Elif:MAI-Voice-2-Flash`.
 
 ### Optional (Podcast Transformation)
-3. Set `AZURE_LLM_ENDPOINT` - Your Azure OpenAI base endpoint (for LLM)
-4. Set `AZURE_LLM_API_KEY` - Your Azure OpenAI API key (can be same as TTS)
+- Set `AZURE_LLM_ENDPOINT` - Your Azure OpenAI base endpoint.
+- Set `AZURE_LLM_API_KEY` - Your Azure OpenAI API key (can be the TTS key).
+- Set `AZURE_LLM_DEPLOYMENT` - Your chat model deployment name.
 
 Configuration methods:
 - **Production**: Use Streamlit secrets (`secrets.toml`)
 - **Local Development**: Use `.env` file (copy `.env.example` to `.env`)
+
+The same TTS fields are available in the app sidebar. Values entered there
+remain in the current Streamlit browser session and are not written to disk.
+
+For Streamlit Community Cloud, open the app settings, choose **Secrets**, and
+paste the relevant entries from `.env.example` using TOML syntax:
+
+```toml
+TTS_PROVIDER = "azure_speech"
+AZURE_SPEECH_ENDPOINT = "https://RESOURCE.cognitiveservices.azure.com"
+AZURE_SPEECH_KEY = "your-key"
+AZURE_SPEECH_VOICE = "tr-TR-Elif:MAI-Voice-2-Flash"
+```
 
 ## 📋 Requirements
 
@@ -78,7 +100,7 @@ Configuration methods:
 ```
 azure-tts-streamlit/
 ├── streamlit_tts_app.py          # Main Streamlit application
-├── requirements_streamlit.txt     # Python dependencies
+├── requirements.txt               # Python dependencies
 ├── README.md                     # This file
 └── web_tts_app.py               # Alternative Flask version
 ```
