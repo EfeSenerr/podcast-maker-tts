@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List
 import io
 import os
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 from markitdown import MarkItDown
@@ -293,6 +294,15 @@ class AzureOpenAITTSClient:
 
 
 class AzureSpeechTTSClient(AzureOpenAITTSClient):
+    TRANSIENT_CANCELLATION_CODES = {
+        speechsdk.CancellationErrorCode.ConnectionFailure,
+        speechsdk.CancellationErrorCode.ServiceError,
+        speechsdk.CancellationErrorCode.ServiceRedirectTemporary,
+        speechsdk.CancellationErrorCode.ServiceTimeout,
+        speechsdk.CancellationErrorCode.ServiceUnavailable,
+        speechsdk.CancellationErrorCode.TooManyRequests
+    }
+
     def __init__(self, endpoint: str, api_key: str, audio_format: str = "mp3"):
         """Initialize Azure AI Speech for neural and MAI voices."""
         self.speech_config = speechsdk.SpeechConfig(
@@ -304,7 +314,7 @@ class AzureSpeechTTSClient(AzureOpenAITTSClient):
         )
         self.audio_format = audio_format
 
-    def text_to_speech(self, text: str, voice: str) -> bytes:
+    def text_to_speech(self, text: str, voice: str, max_attempts: int = 3) -> bytes:
         """Convert text to speech with the Azure Speech SDK."""
         locale_parts = voice.split("-", 2)[:2]
         language = "-".join(locale_parts) if len(locale_parts) == 2 else "en-US"
@@ -315,17 +325,30 @@ class AzureSpeechTTSClient(AzureOpenAITTSClient):
             f'<voice name="{html.escape(voice)}">{html.escape(text)}</voice>'
             "</speak>"
         )
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=self.speech_config,
-            audio_config=None
-        )
-        result = synthesizer.speak_ssml_async(ssml).get()
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-            return bytes(result.audio_data)
+        for attempt in range(1, max_attempts + 1):
+            synthesizer = speechsdk.SpeechSynthesizer(
+                speech_config=self.speech_config,
+                audio_config=None
+            )
+            result = synthesizer.speak_ssml_async(ssml).get()
+            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                return bytes(result.audio_data)
 
-        cancellation = speechsdk.SpeechSynthesisCancellationDetails.from_result(result)
-        detail = cancellation.error_details or str(cancellation.reason)
-        raise RuntimeError(f"Azure Speech synthesis failed: {detail}")
+            cancellation = result.cancellation_details
+            error_code = cancellation.error_code
+            if (
+                error_code in self.TRANSIENT_CANCELLATION_CODES
+                and attempt < max_attempts
+            ):
+                time.sleep(attempt)
+                continue
+
+            detail = cancellation.error_details or str(cancellation.reason)
+            raise RuntimeError(
+                f"Azure Speech synthesis failed ({error_code}): {detail}"
+            )
+
+        raise RuntimeError("Azure Speech synthesis failed after all retry attempts.")
 
 
 class FileParser:
