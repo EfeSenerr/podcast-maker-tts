@@ -449,6 +449,7 @@ def main():
             else "AZURE_TTS_ENDPOINT"
         )
         key_name = "AZURE_SPEECH_KEY" if tts_provider == "azure_speech" else "AZURE_API_KEY"
+        configured_api_key = get_config_value(key_name)
 
         with st.expander("🔐 API configuration", expanded=True):
             endpoint = st.text_input(
@@ -460,13 +461,20 @@ def main():
                     "For Azure OpenAI, use the resource base URL or full audio/speech URL."
                 )
             ).strip()
-            api_key = st.text_input(
-                "API key",
-                value=get_config_value(key_name),
-                key=f"{tts_provider}_api_key",
+            # Remove values retained by sessions created before configured secrets
+            # were separated from browser-visible widget state.
+            st.session_state.pop(f"{tts_provider}_api_key", None)
+            api_key_override = st.text_input(
+                "Temporary API key override (optional)",
+                value="",
+                key=f"{tts_provider}_api_key_override_v2",
                 type="password",
-                help="Used only for this browser session; the app does not save it."
+                help=(
+                    "Leave blank to use the server-side configured secret. "
+                    "A value entered here is used only for this browser session."
+                )
             ).strip()
+            api_key = api_key_override or configured_api_key
 
             if tts_provider == "azure_openai":
                 tts_model = st.text_input(
@@ -486,17 +494,24 @@ def main():
                     help="Example MAI voice: tr-TR-Elif:MAI-Voice-2-Flash"
                 ).strip()
 
+        configured_llm_api_key = get_config_value("AZURE_LLM_API_KEY")
         with st.expander("🤖 Optional podcast transformation"):
             llm_endpoint = st.text_input(
                 "LLM endpoint",
                 value=get_config_value("AZURE_LLM_ENDPOINT"),
                 help="Azure OpenAI resource base URL."
             ).strip()
-            llm_api_key = st.text_input(
-                "LLM API key",
-                value=get_config_value("AZURE_LLM_API_KEY"),
-                type="password"
+            llm_api_key_override = st.text_input(
+                "Temporary LLM API key override (optional)",
+                value="",
+                key="llm_api_key_override_v2",
+                type="password",
+                help=(
+                    "Leave blank to use the server-side configured secret. "
+                    "A value entered here is used only for this browser session."
+                )
             ).strip()
+            llm_api_key = llm_api_key_override or configured_llm_api_key
             llm_model = st.text_input(
                 "LLM deployment name",
                 value=get_config_value("AZURE_LLM_DEPLOYMENT", "gpt-4.1"),

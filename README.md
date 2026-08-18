@@ -63,8 +63,10 @@ Configuration methods:
 - **Production**: Use Streamlit secrets (`secrets.toml`)
 - **Local Development**: Use `.env` file (copy `.env.example` to `.env`)
 
-The same TTS fields are available in the app sidebar. Values entered there
-remain in the current Streamlit browser session and are not written to disk.
+The same TTS fields are available in the app sidebar. Configured API keys stay
+server-side and are never populated into browser fields. An optional key
+override entered in the sidebar remains in that browser session and is not
+written to disk.
 
 For Streamlit Community Cloud, open the app settings, choose **Secrets**, and
 paste the relevant entries from `.env.example` using TOML syntax:
