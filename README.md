@@ -55,9 +55,19 @@ Choose one provider with `TTS_PROVIDER`:
   as `tr-TR-Elif:MAI-Voice-2-Flash`.
 
 ### Optional (Podcast Transformation)
-- Set `AZURE_LLM_ENDPOINT` - Your Azure OpenAI base endpoint.
-- Set `AZURE_LLM_API_KEY` - Your Azure OpenAI API key (can be the TTS key).
-- Set `AZURE_LLM_DEPLOYMENT` - Your chat model deployment name.
+- Set `AZURE_LLM_ENDPOINT` - Your Azure OpenAI v1 endpoint, such as
+  `https://RESOURCE.services.ai.azure.com/openai/v1`.
+- Set `AZURE_LLM_AUTH` to `api_key` or `default_azure_credential`.
+- For `api_key`, set `AZURE_LLM_API_KEY` (it can be the TTS key when both
+  services use the same resource).
+- Set `AZURE_LLM_DEPLOYMENT` - Your Responses-compatible deployment name,
+  such as `gpt-5.6-luna`.
+
+The LLM backend uses the OpenAI Responses API. `default_azure_credential`
+authenticates through a local Azure CLI/developer login or a managed identity
+with access to the Foundry resource. Streamlit Community Cloud does not provide
+an Azure managed identity, so API-key authentication is normally required
+there.
 
 Configuration methods:
 - **Production**: Use Streamlit secrets (`secrets.toml`)

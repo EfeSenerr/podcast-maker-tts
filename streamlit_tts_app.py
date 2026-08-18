@@ -14,7 +14,8 @@ from PyPDF2 import PdfReader
 from docx import Document
 import tempfile
 import azure.cognitiveservices.speech as speechsdk
-from openai import AzureOpenAI
+from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+from openai import OpenAI
 
 # Load environment variables from .env file for  
 load_dotenv()
@@ -71,7 +72,25 @@ IMPORTANT RULES:
 Original text to transform:
 {text}
 
-Generate the educational podcast script:"""
+Generate the educational podcast script:""",
+
+    "character-repair": """Repair only character, encoding, spelling, punctuation, and spacing problems in the following text.
+
+STRICT RULES:
+1. Preserve the original language, wording, meaning, tone, paragraph structure, and order.
+2. Do not summarize, translate, rewrite, rephrase, expand, or remove content.
+3. Fix mojibake, replacement characters, broken Unicode characters, incorrect smart quotes, and accidental spacing around punctuation.
+4. Restore language-specific characters only when the intended character is clear from context.
+5. Correct obvious misspellings, including transposed, missing, repeated, or extra letters.
+6. Correct malformed word forms only when the intended word is unambiguous from context.
+7. Make the smallest possible correction. Do not replace valid words merely to improve style, fluency, or grammar.
+8. If a suspected character or word problem is ambiguous, leave it unchanged.
+9. Return only the corrected text without commentary, headings, or quotation marks.
+
+Original text:
+{text}
+
+Corrected text:"""
 }
 
 
@@ -90,6 +109,21 @@ def azure_resource_endpoint(endpoint: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         raise ValueError("Endpoint must be a complete HTTPS URL.")
     return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def azure_openai_v1_endpoint(endpoint: str) -> str:
+    """Normalize Azure OpenAI and Foundry resource URLs for the v1 API."""
+    base_endpoint = endpoint.strip().split("/openai/deployments", 1)[0].rstrip("/")
+    if not base_endpoint:
+        raise ValueError("LLM endpoint is required.")
+    if base_endpoint.endswith("/openai/v1"):
+        return f"{base_endpoint}/"
+    return f"{base_endpoint}/openai/v1/"
+
+
+def resolve_text_input(manual_text: str, uploaded_text: str) -> str:
+    """Prefer successfully parsed uploads; otherwise retain manually entered text."""
+    return uploaded_text if uploaded_text.strip() else manual_text
 
 
 class AzureOpenAITTSClient:
@@ -376,17 +410,25 @@ class FileParser:
                 raise Exception(f"Unsupported file format: {file_extension}")
 
 class TextTransformer:
-    """Transform text using Azure OpenAI LLM for podcast-style content"""
-    
-    def __init__(self, endpoint: str, api_key: str):
-        """Initialize the Azure OpenAI client for text transformation"""
-        # Extract base endpoint (remove /openai/deployments/... if present)
-        base_endpoint = endpoint.split('/openai/deployments')[0] if '/openai/deployments' in endpoint else endpoint
-        
-        self.client = AzureOpenAI(
-            azure_endpoint=base_endpoint,
-            api_key=api_key,
-            api_version="2024-10-21"
+    """Transform text with the Azure OpenAI v1 Responses API."""
+
+    def __init__(self, endpoint: str, api_key: str = "", auth_method: str = "api_key"):
+        """Initialize API-key or Microsoft Entra ID authentication."""
+        if auth_method == "default_azure_credential":
+            client_api_key = get_bearer_token_provider(
+                DefaultAzureCredential(),
+                "https://ai.azure.com/.default"
+            )
+        elif auth_method == "api_key":
+            if not api_key:
+                raise ValueError("An LLM API key is required for API-key authentication.")
+            client_api_key = api_key
+        else:
+            raise ValueError(f"Unsupported LLM authentication method: {auth_method}")
+
+        self.client = OpenAI(
+            base_url=azure_openai_v1_endpoint(endpoint),
+            api_key=client_api_key
         )
     
     def transform_text(self, text: str, style: str, model: str = "gpt-4o-mini") -> str:
@@ -401,16 +443,18 @@ class TextTransformer:
         prompt = prompt_template.format(text=text)
         
         try:
-            response = self.client.chat.completions.create(
+            response = self.client.responses.create(
                 model=model,
-                messages=[
-                    {"role": "system", "content": "You are a professional podcast script writer who creates engaging audio content."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=16000
+                instructions=(
+                    "Follow the selected transformation instructions exactly. "
+                    "Return only the transformed text."
+                ),
+                input=prompt,
+                max_output_tokens=16000
             )
-            return response.choices[0].message.content
+            if not response.output_text:
+                raise RuntimeError("The model returned no text.")
+            return response.output_text
         except Exception as e:
             raise Exception(f"LLM transformation failed: {str(e)}")
 
@@ -499,24 +543,52 @@ def main():
             llm_endpoint = st.text_input(
                 "LLM endpoint",
                 value=get_config_value("AZURE_LLM_ENDPOINT"),
-                help="Azure OpenAI resource base URL."
-            ).strip()
-            llm_api_key_override = st.text_input(
-                "Temporary LLM API key override (optional)",
-                value="",
-                key="llm_api_key_override_v2",
-                type="password",
                 help=(
-                    "Leave blank to use the server-side configured secret. "
-                    "A value entered here is used only for this browser session."
+                    "Azure OpenAI or Foundry v1 URL, for example "
+                    "https://RESOURCE.services.ai.azure.com/openai/v1."
                 )
             ).strip()
-            llm_api_key = llm_api_key_override or configured_llm_api_key
+            llm_auth_labels = {
+                "api_key": "API key",
+                "default_azure_credential": "DefaultAzureCredential (Microsoft Entra ID)"
+            }
+            configured_llm_auth = get_config_value("AZURE_LLM_AUTH", "api_key")
+            if configured_llm_auth not in llm_auth_labels:
+                configured_llm_auth = "api_key"
+            llm_auth_method = st.selectbox(
+                "LLM authentication",
+                options=list(llm_auth_labels),
+                index=list(llm_auth_labels).index(configured_llm_auth),
+                format_func=lambda value: llm_auth_labels[value],
+                help=(
+                    "DefaultAzureCredential uses your local Azure CLI/developer login "
+                    "or the deployment's managed identity."
+                )
+            )
+            if llm_auth_method == "api_key":
+                llm_api_key_override = st.text_input(
+                    "Temporary LLM API key override (optional)",
+                    value="",
+                    key="llm_api_key_override_v2",
+                    type="password",
+                    help=(
+                        "Leave blank to use the server-side configured secret. "
+                        "A value entered here is used only for this browser session."
+                    )
+                ).strip()
+                llm_api_key = llm_api_key_override or configured_llm_api_key
+            else:
+                llm_api_key = ""
             llm_model = st.text_input(
                 "LLM deployment name",
-                value=get_config_value("AZURE_LLM_DEPLOYMENT", "gpt-4.1"),
-                help="This must match an Azure OpenAI chat model deployment."
+                value=get_config_value("AZURE_LLM_DEPLOYMENT", "gpt-5.6-luna"),
+                help="This must match an Azure OpenAI Responses-compatible deployment."
             ).strip()
+
+        llm_auth_ready = (
+            llm_auth_method == "default_azure_credential"
+            or bool(llm_api_key)
+        )
 
         # Show connection status
         if endpoint and api_key:
@@ -527,7 +599,7 @@ def main():
             st.caption("Enter credentials above or configure Streamlit secrets")
         
         # Show LLM connection status
-        if llm_endpoint and llm_api_key:
+        if llm_endpoint and llm_auth_ready:
             st.success("🤖 Azure LLM configuration ready")
             st.caption("Credentials are validated when transformation runs")
         else:
@@ -575,11 +647,17 @@ def main():
         st.markdown("### 🎙️ Processing Mode")
         
         # Determine available processing modes based on LLM configuration
-        if llm_endpoint and llm_api_key:
-            available_modes = ["direct", "podcast-detailed", "podcast-summary", "podcast-educational"]
+        if llm_endpoint and llm_auth_ready:
+            available_modes = [
+                "direct",
+                "character-repair",
+                "podcast-detailed",
+                "podcast-summary",
+                "podcast-educational"
+            ]
         else:
             available_modes = ["direct"]
-            st.caption("⚠️ Configure LLM credentials to enable podcast modes")
+            st.caption("⚠️ Configure the LLM endpoint and authentication to enable transformations")
         
         # Processing mode selection
         processing_mode = st.selectbox(
@@ -588,6 +666,7 @@ def main():
             index=0,
             format_func=lambda x: {
                 "direct": "📄 Direct - Convert text as-is",
+                "character-repair": "🔤 Text Repair - Fix characters & spelling",
                 "podcast-detailed": "🎙️ Podcast (Detailed) - Full content, conversational",
                 "podcast-summary": "📋 Podcast (Summary) - Key points only",
                 "podcast-educational": "📚 Podcast (Educational) - Easy to understand"
@@ -608,13 +687,14 @@ def main():
         input_tab1, input_tab2 = st.tabs(["✍️ Type/Paste Text", "📁 Upload File"])
         
         with input_tab1:
-            text_input = st.text_area(
+            manual_text_input = st.text_area(
                 "Enter your text to convert to speech:",
                 value="""You can paste any text here.""",
                 height=200,
                 key="manual_text_input"
             )
-        
+
+        uploaded_text_input = ""
         with input_tab2:
             st.markdown("**Upload documents to convert to speech**")
             st.caption("You can upload multiple files (up to 3). They will be combined in upload order.")
@@ -674,12 +754,9 @@ def main():
                         )
                         st.caption(f"Total characters: {len(combined_parsed_text):,} | Files: {len(uploaded_files)}")
                     
-                    # Use combined parsed text as input
-                    text_input = combined_parsed_text
-                else:
-                    text_input = ""
-            else:
-                text_input = ""
+                    uploaded_text_input = combined_parsed_text
+
+        text_input = resolve_text_input(manual_text_input, uploaded_text_input)
 
         # Safety: Limit input to ~10 pages (about 30,000 characters)
         MAX_INPUT_CHARS = 50000  # ~10 pages (assuming 3000 chars/page)
@@ -713,13 +790,20 @@ def main():
                 
                 # Apply LLM transformation if selected
                 if processing_mode != "direct":
-                    if not llm_endpoint or not llm_api_key:
-                        st.error("❌ LLM credentials not configured. Please set AZURE_LLM_ENDPOINT and AZURE_LLM_API_KEY in your .env file or secrets.")
+                    if not llm_endpoint or not llm_auth_ready:
+                        st.error(
+                            "❌ LLM configuration is incomplete. Configure the endpoint "
+                            "and selected authentication method."
+                        )
                         return
                     
                     with st.spinner(f"🤖 Transforming text to {processing_mode} style..."):
-                        st.info(f"Using {llm_model} to create podcast-style content...")
-                        transformer = TextTransformer(llm_endpoint, llm_api_key)
+                        st.info(f"Using {llm_model} to transform the text...")
+                        transformer = TextTransformer(
+                            llm_endpoint,
+                            llm_api_key,
+                            llm_auth_method
+                        )
                         final_text = transformer.transform_text(final_text, processing_mode, llm_model)
                         st.success(f"✅ Text transformed! New length: {len(final_text):,} characters")
                         
