@@ -102,7 +102,9 @@ AZURE_SPEECH_VOICE = "tr-TR-Elif:MAI-Voice-2-Flash"
 
 1. **Text Input**: Type/paste text OR upload a document (TXT, PDF, DOCX)
 2. **File Parsing**: Documents are automatically parsed using MarkItDown with smart fallback methods
-3. **Text Chunking**: Long texts are automatically split into chunks (≤6000 characters)
+3. **Text Chunking**: Azure OpenAI uses chunks up to 6,000 characters.
+   Azure Speech starts at 2,500 characters and automatically subdivides a
+   chunk if the MAI backend rejects its generated audio size.
 4. **Parallel Processing**: Multiple API calls process chunks simultaneously
 5. **Sequential Playback**: Audio chunks play in order for natural speech flow
 6. **Mobile Optimization**: Responsive design works on all devices

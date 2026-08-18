@@ -294,6 +294,8 @@ class AzureOpenAITTSClient:
 
 
 class AzureSpeechTTSClient(AzureOpenAITTSClient):
+    DEFAULT_CHUNK_CHARS = 2500
+    MIN_SPLIT_CHARS = 250
     TRANSIENT_CANCELLATION_CODES = {
         speechsdk.CancellationErrorCode.ConnectionFailure,
         speechsdk.CancellationErrorCode.ServiceError,
@@ -313,6 +315,40 @@ class AzureSpeechTTSClient(AzureOpenAITTSClient):
             speechsdk.SpeechSynthesisOutputFormat.Audio24Khz160KBitRateMonoMp3
         )
         self.audio_format = audio_format
+
+    def chunk_text(
+        self,
+        text: str,
+        max_chars: int = DEFAULT_CHUNK_CHARS
+    ) -> List[str]:
+        """Use smaller initial chunks for Speech audio-duration constraints."""
+        return super().chunk_text(text, max_chars)
+
+    @staticmethod
+    def _is_audio_size_failure(detail: str) -> bool:
+        normalized = detail.casefold()
+        return (
+            "failedprecondition" in normalized
+            and "audio size" in normalized
+        )
+
+    def _synthesize_split_text(
+        self,
+        text: str,
+        voice: str,
+        max_attempts: int
+    ) -> bytes:
+        target_chars = max(self.MIN_SPLIT_CHARS, len(text) // 2)
+        parts = super().chunk_text(text, target_chars)
+        if len(parts) < 2:
+            raise RuntimeError(
+                "Azure Speech rejected a minimum-size chunk because of its "
+                "generated audio size."
+            )
+        return b"".join(
+            self.text_to_speech(part, voice, max_attempts)
+            for part in parts
+        )
 
     def text_to_speech(self, text: str, voice: str, max_attempts: int = 3) -> bytes:
         """Convert text to speech with the Azure Speech SDK."""
@@ -336,6 +372,10 @@ class AzureSpeechTTSClient(AzureOpenAITTSClient):
 
             cancellation = result.cancellation_details
             error_code = cancellation.error_code
+            detail = cancellation.error_details or str(cancellation.reason)
+            if self._is_audio_size_failure(detail):
+                return self._synthesize_split_text(text, voice, max_attempts)
+
             if (
                 error_code in self.TRANSIENT_CANCELLATION_CODES
                 and attempt < max_attempts
@@ -343,7 +383,6 @@ class AzureSpeechTTSClient(AzureOpenAITTSClient):
                 time.sleep(attempt)
                 continue
 
-            detail = cancellation.error_details or str(cancellation.reason)
             raise RuntimeError(
                 f"Azure Speech synthesis failed ({error_code}): {detail}"
             )
